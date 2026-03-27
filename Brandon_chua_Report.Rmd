@@ -1,0 +1,821 @@
+---
+title: "Single_cell_Sequencing_report"
+author: "Brandon Chua, 4745778"
+date: "2025-04-13"
+output: html_document
+---
+
+# Introduction
+
+Recent advancements in single-cell RNA sequencing (scRNA-seq) have enhanced the ability to explore cellular diversity within complex tissues. This report outlines an analysis pipeline applied to scRNA-seq data from pleurodeles. After obtaining the raw data, quality control filters were applied to ensure data reliability. Dimensionality reduction methods were used to capture gene expression variation, followed by clustering to identify distinct cell populations. Marker gene analysis was then employed to classify cell types based on known biological markers.
+
+The top variable genes, such as PTGDS, TAC1, CST3, CCK, NPY, NTS, PDGFRA, C1QB, SST, and SCGN, highlighted significant variation in gene expression. These genes play key roles in processes like neurotransmitter signaling and immune response, offering insights into the functions of the cells in the study.
+
+Highly expressed genes across clusters included SHISA8, GABRA3, GJA1, TBR1, HPCAL1, LHX9, SV2C, CDH2, KCNK3, and PDYN. These genes are associated with neuronal signaling, calcium binding, and cell adhesion, which were useful for annotating specific cell types. Pseudobulk aggregation was used to compare gene expression between clusters, and correlation and hierarchical clustering analyses assessed transcriptomic relationships. Differential expression analysis between excitatory and inhibitory neuron pseudobulks revealed distinct gene expression patterns. The results were visualized through various plots, including PCA, UMAP, and t-SNE projections, heatmaps, and dendrograms. This method provides a comprehensive approach for analyzing scRNA-seq data, with potential applications for different tissues or experimental conditions. The use of quality control and integrated dimensionality reduction ensures reliable results and enables the identification of rare cell populations, offering valuable insights into cellular development and disease mechanisms.
+
+# Answering the questions
+
+Valid droplets contain significant RNA transcripts, indicating the presence of cellular content. These droplets represent captured cells and are distinguishable by their relatively high UMI (unique molecular identifier) counts. In contrast, "empty" droplets have minimal RNA transcripts, often resulting from ambient RNA contamination in the solution. These droplets lack viable cells and serve as background noise in the dataset.
+
+Reads in "empty" droplets typically originate from ambient RNA in the experimental solution. This background RNA may be released from lysed cells during the preparation of the single-cell RNA sequencing library or result from incomplete washing steps. The contamination introduces noise that needs to be mitigated to improve downstream analyses.
+
+The dataset consists of a matrix where the rows represent individual data points (cells) and the columns represent measured features (genes). The dimensions of the dataset are determined by the number of cells identified after filtering and the number of genes expressed above a set threshold. Initially, the data's dimensionality corresponds to the total number of genes; however, this is often reduced in subsequent analyses. Dimensionality reduction serves as a crucial step in simplifying the data for visualization and interpretation. Linear methods, such as Principal Component Analysis (PCA), focus on maximizing variance along orthogonal axes, preserving global structures, and ensuring interpretability by maintaining linear relationships. In contrast, non-linear methods like UMAP and t-SNE excel at capturing local relationships but may sacrifice interpretability due to their inability to represent global structures accurately.
+
+In exploring PCA, it was found that the first few principal components explained the majority of the variance in the data. Further examination of additional principal components revealed correlations with specific genes, highlighting biological signals and heterogeneity within the dataset. For instance, DimPlots of PCA components 3 and 4, as well as 5 and 6, displayed distinct clustering patterns associated with marker genes. These correlations were integral for coarse cell type annotations, incorporating both prior knowledge and observed gene expression profiles. Marker genes such as SHISA8, CXCL14, and SCN5A were used as primary identifiers, with available databases and resources, including gene ontology annotations, enhancing the manual curation process.
+
+To classify cell types in the dataset, a combined approach of prior biological knowledge and data-driven analysis was employed. Dimensionality reduction techniques like PCA and UMAP identified clusters based on gene expression profiles. PCA was particularly valuable for capturing the most significant sources of variation. The first two principal components explained most of the variance, while additional exploration of components 3-6 revealed distinct clustering patterns. By cross-referencing gene expression levels with existing literature and databases such as Gene Ontology, tentative cell type identities were assigned to clusters. For example, high expression of SHISA8 suggested neuronal lineage, while CXCL14 indicated immune or epithelial origins.
+
+This hybrid strategy integrated prior transcriptional knowledge while validating results against unbiased clustering outcomes, ensuring that cell type assignments were both biologically meaningful and data-supported. Visualization of marker gene expression within clusters provided further insights into cellular heterogeneity, confirming the robustness of the annotations. Iterative refinement of clusters based on gene expression patterns and biological plausibility allowed for the development of a framework to categorize cells into coarse groups, laying the foundation for further detailed analysis.
+
+After subsetting the dataset, PCA was re-run to refine the clustering process and recalibrate the variance explanation, eliminating noise from irrelevant cells. Re-running PCA after subsetting ensures that the reduced dataset’s variance is properly captured. Subsetting removes noise or irrelevant data, making the PCA results more reflective of the true biological variation. This leads to more accurate clustering and improved downstream analyses. Distances between annotated clusters were then calculated using Euclidean or Manhattan distances, providing a quantitative measure of similarity and enabling further hierarchical clustering. Bootstrap methods were incorporated into hierarchical clustering to assess the stability of cluster assignments.
+
+Downsampling the dataset for pairwise correlation analyses improved computational efficiency and reduced bias from overrepresented cell types. However, this approach also posed the risk of losing rare cell populations and their contributions to the overall dataset structure. Transcriptomic correlation analysis revealed relationships between cell types, shedding light on developmental lineages and functional similarities. However, this approach has limitations when comparing species due to discrepancies in genome annotation quality, evolutionary divergence, and cross-species gene orthology chatiously.
+
+Bootstrap is used to assess the stability of clusters by resampling the data multiple times. Each resampled dataset is clustered, and the consistency of clusters across iterations is measured. Stable clusters that appear frequently indicate reliable biological signals, while inconsistent clusters suggest instability and should be interpreted cautiously.
+
+The FindMarkers() function, commonly used for identifying differentially expressed genes, could introduce biases in multi-replicate datasets due to variability in detection rates or gene expression distributions across replicates. To mitigate this, differential expression can be calculated using linear models or mixed-effects models that account for replicate structures, thereby improving accuracy and reliability. These alternative methods help to capture true biological signals while minimizing technical noise, ensuring comprehensive and robust analysis of the dataset.
+
+# Load required packages
+
+```{r}
+library(Matrix)
+library(Seurat)
+library(dplyr)
+library(KneeArrower)
+```
+
+# Set working directory to your data folder
+
+```{r}
+setwd("C:/Users/chuab/Desktop/Single Cell RNA seq file/Single_cell_report_data")
+```
+
+# Load data: matrix.mtx, barcodes.tsv, features.tsv
+
+```{r}
+mat <- readMM("matrix.mtx")
+barcodes <- read.table("barcodes.tsv", header = FALSE)[[1]]
+genes <- read.table("features.tsv", header = FALSE)[[1]]
+```
+
+# Assign row/column names
+
+```{r}
+rownames(mat) <- genes
+colnames(mat) <- barcodes
+```
+
+# Calculate UMI per cell and create knee plot
+
+```{r}
+umi_per_cell <- colSums(mat)
+sorted_umi <- sort(umi_per_cell, decreasing = TRUE)
+cumulative_sum <- cumsum(sorted_umi)
+knee <- findCutoff(
+  x = 2000:5000,  # Use the range specified in the PDF
+  y = cumulative_sum[2000:5000],
+  method = "first",
+  frac.of.steepest.slope = 0.1  # Parameter from the PDF
+)
+plot(cumulative_sum[1:10000],  # Focus on first 10k barcodes (matches PDF)
+     type = "l",
+     log = "y",
+     main = "Knee Plot",
+     xlab = "Barcodes (sorted by UMI count)",
+     ylab = "Cumulative UMIs (log scale)")
+abline(v = ceiling(knee$x), col = "red")
+```
+
+A knee plot was generated as part of the initial quality control step in single-cell RNA-sequencing analysis to determine the optimal threshold for filtering out low-quality cells. This plot visualizes the cumulative UMI (unique molecular identifier) counts for all cells, arranged in descending order of total UMI counts. The knee plot highlights a sharp inflection point where UMI counts decrease abruptly, marking the transition between high-quality cells and potential empty droplets or low-quality cells. An algorithm identifies the steepest slope and selects a threshold just below this inflection point. This threshold ensures that cells with sufficient transcriptomic content are retained while excluding low-quality data. In the plot, the x-axis represents barcodes ordered by total UMI counts, and the y-axis shows the cumulative UMI counts, often on a log scale. The curve reflects RNA molecule distribution across droplets, and the knee point serves as a cutoff, distinguishing valid droplets from empty ones based on their RNA content.
+
+# Filter matrix based on knee point
+
+```{r}
+filtered_mat <- mat[, names(sorted_umi)[1:knee$x]]
+writeMM(filtered_mat, "filtered_matrix.mtx")
+write.csv(colnames(filtered_mat), "filtered_barcodes.csv")
+write.csv(rownames(filtered_mat), "filtered_genes.csv")
+```
+
+# Create Seurat object with QC filters
+
+```{r}
+seurat_obj <- CreateSeuratObject(
+  counts = filtered_mat,
+  min.cells = 3,    # Keep genes detected in ≥3 cells
+  min.features = 100 # Keep cells with ≥100 detected genes
+)
+```
+
+# Calculate mitochondrial percentage (adjust gene prefix for your species!)
+
+```{r}
+mito_genes <- c("ND1", "ND4L", "ND5", "ND6", "COX1", "COX2", "COX3", "CYTB", "ATP6")
+seurat_obj[["percent_mito"]] <- PercentageFeatureSet(seurat_obj, features = mito_genes)
+```
+
+The min.cells argument specifies the minimum number of cells in which a gene must be expressed to be included in the dataset. This helps filter out low-quality or non-informative genes. The min.features argument defines the minimum number of features (genes) a cell must express to be considered a valid cell. These parameters ensure the dataset focuses on biologically meaningful data.
+
+# QC violin plots
+
+```{r}
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent_mito"))
+```
+
+nFeature_RNA: Represents the number of genes detected in each cell, serving as an indicator of the gene expression diversity within the cell.
+
+nCount_RNA: Denotes the total number of UMIs per cell, reflecting the overall level of transcriptional activity.
+
+percent_mito: Indicates the proportion of reads mapping to mitochondrial genes. Elevated mitochondrial percentages can signify stressed or dying cells.
+
+Violin plots visualize the distribution of a metric (e.g., nFeature_RNA, nCount_RNA, or percent_mito) across all cells in the dataset. The width of the plot indicates the density of cells with a given value. For example, a violin plot of nFeature_RNA shows the range of detected genes per cell, with wider regions indicating more cells at those values. Outliers and skewness in these plots can highlight anomalies such as low-quality cells.
+
+A QC violin plot was generated to evaluate the quality of the single-cell RNA-sequencing data using three metrics: nFeature_RNA, nCount_RNA, and percent_mito. The nFeature_RNA plot revealed a majority of data points concentrated within the range of 3000–6000, indicating that most cells displayed a robust number of detected features. However, smaller distributions of data points below 3000 and above 6000 suggested the presence of potential low-quality cells or doublets, respectively.
+
+The nCount_RNA plot showed a high density of data points within the 0–20000 range, with a smaller subset extending beyond 20000, reflecting variability in transcript abundance per cell. For the percent_mito metric, the majority of cells had a mitochondrial RNA content below 10%, indicative of good-quality cells. Nevertheless, a small subset exhibited mitochondrial RNA content up to 60%, possibly representing stressed or dying cells.
+
+# Filter outliers
+
+```{r}
+seurat_obj[["percent_mito"]] <- PercentageFeatureSet(seurat_obj, features = mito_genes)
+seurat_obj <- subset(
+  seurat_obj,
+  subset = nFeature_RNA > quantile(seurat_obj$nFeature_RNA, 0.01) &
+    nCount_RNA < quantile(seurat_obj$nCount_RNA, 0.99) &
+    percent_mito < quantile(seurat_obj$percent_mito, 0.95)
+)
+```
+
+# Normalization and Variable Features
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+```
+
+# Normalize data (LogNormalize)
+
+```{r}
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+# Identify variable features (HVGs)
+
+```{r}
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+```
+
+# Plot variable features
+
+```{r}
+top10 <- head(VariableFeatures(seurat_obj), 10)
+plot1 <- VariableFeaturePlot(seurat_obj)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2 + ggtitle("Top 10 Highly Variable Genes")
+```
+
+Highly variable genes exhibit significant expression differences across cells due to biological variability, such as differential activation of pathways or cell-type specificity. Other genes may show consistent expression levels due to housekeeping functions or low transcriptional activity. Technical noise can also contribute to variability.
+
+Highly variable genes capture the most meaningful biological differences between cells, making them crucial for clustering and downstream analyses. Selecting these genes reduces dimensionality and computational complexity while retaining biologically relevant information. Therefore, we select them.
+
+To visualize the variable features of the dataset, a plot was created highlighting both variable and non-variable genes. The top 10 variable genes identified were PTGS, TAC1, CST3, CCK, NPY, NTS, SST, C1QB, PDGFRA, and SCGN.
+
+The y-axis of the plot represents the standardized value, where the non-variable genes, indicated by black dots, numbered 11,103. These points were concentrated close to 0 on the y-axis, with their average expression values distributed along the x-axis. The x-axis, representing the average expression, displayed a spread ranging from 1e-02 to 1e+02, with a few points extending beyond 1e+02.
+
+In contrast, the variable genes, indicated by red dots and numbering 2000, exhibited y-axis values ranging from slightly above 0 to a maximum standardized value of 30. On the x-axis, the majority of the variable genes showed average expression levels within the range of 1e-02 to 1e+02, with only a few red dots appearing below 1e-02.
+
+This visualization effectively distinguished between highly variable and non-variable genes, with the identification of key variable genes offering valuable insights for downstream analyses.
+
+# Scaling and PCA
+
+```{r}
+seurat_obj <- ScaleData(seurat_obj) # Regress out technical variation
+```
+
+# Run PCA (using HVGs)
+
+```{r}
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(seurat_obj), npcs = 100)
+```
+
+# Visualize PCA results
+
+The Seurat project was used in this analysis to perform dimensionality reduction and clustering on high-dimensional single-cell RNA sequencing data. The primary purpose of utilizing Seurat for generating PCA graphs is to identify and visualize patterns of gene expression across different cells within the dataset. By projecting the data into principal components, the Seurat analysis helps uncover underlying structures, groupings, or clusters of cells that share similar expression profiles.
+
+PCA, as applied in the Seurat framework, allows for the reduction of the complexity of the data while retaining key biological information. The resulting plots from PCA (such as those shown for PCA1 to PCA4) offer insights into how cells are distributed based on their gene expression, highlighting potential subpopulations, rare cell types, or biological processes that might otherwise be obscured in the raw high-dimensional data. This enables further downstream analysis, such as cell type identification, differential expression analysis, and pathway exploration.
+
+```{r}
+VizDimLoadings(seurat_obj, dims = 1:2, reduction = "pca") # Top genes per PC
+DimPlot(seurat_obj, reduction = "pca", group.by = "orig.ident") # Cells in PCA space
+```
+
+When comparing PCA_1 (x-axis) with PCA_2 (y-axis) in the Seurat project data, distinct patterns of clustering and dispersion were observed. The primary clustering occurred within the range of -10 to 10 on the y-axis and 0 to -10 on the x-axis. This central region highlighted a core grouping of data points, indicating potential shared features or biological similarities within these clusters.
+
+Beyond this central clustering, other Seurat data points were scattered widely. On the y-axis, these points ranged from -40 to 20, while on the x-axis, they extended from 0 to 40. These scattered data points likely represent variability or less tightly correlated features within the dataset.
+
+Notably, a potential clustering trend was observed in the region between 10 and 20 on the y-axis and 30 to 40 on the x-axis. This suggests the presence of a secondary grouping or distinct subset of cells or features that may warrant further investigation. These findings reflect both the complexity and potential hierarchical structure of the data when analyzed using PCA.
+
+# Explore PCs 3-5
+
+```{r}
+VizDimLoadings(seurat_obj, dims = 3:5, reduction = "pca")
+DimPlot(seurat_obj, reduction = "pca", dims = c(3,4))
+```
+
+When comparing PCA_3 (x-axis) with PCA_4 (y-axis) in the Seurat project data, the data points displayed a distinct clustering pattern near 0 on the y-axis, while spreading along the x-axis from approximately -10 to above 10. This central clustering suggests a concentration of data points with shared characteristics or features along these principal components.
+
+In addition to the central cluster, there were scattered data points outside this region. These points ranged widely on the y-axis, from around -50 to 50, and on the x-axis, from below -10 to above 10, indicating a distribution of more variable or less tightly associated data.
+
+A small but notable clustering was observed near 10 on the y-axis, within the range of -4 to 0 on the x-axis. This secondary cluster might represent a unique subset of features or cells within the dataset, highlighting the multidimensional complexity of the PCA analysis.
+
+# Highlight Gene expression
+
+```{r}
+FeaturePlot(seurat_obj, features = c("PTGDS", "TAC1", "CST3", "CCK", "NPY", "NTS", "PDGFRA", "C1QB", "SST", "SCGN"), reduction = "pca", dims = 1:2)
+
+```
+
+The FeaturePlot command visualizes the expression of the top 10 variable genes (PTGDS, TAC1, CST3, CCK, NPY, NTS, PDGFRA, C1QB, SST, and SCGN) over the PCA embedding, specifically using the first two principal components (PC1 and PC2). Each gene is represented in an individual plot where cells are colored according to their expression level, with higher expression typically shown in brighter colors and low or no expression in darker tones. These plots allow the identification of spatial patterns of gene expression within the PCA space, highlighting areas where specific genes are highly expressed. Such localized patterns can provide insights into the contribution of these genes to the clustering observed in the PCA plot. Each high variable gene exhibits high expression in distinct regions, which indicates that these genes are likely influential in defining particular cell clusters. Additionally, overlapping expression patterns of genes could suggest they jointly characterize a cluster or are functionally related.
+
+```{r}
+FeaturePlot(seurat_obj, c("nCount_RNA", "nFeature_RNA"), reduction = "pca", dims = 1:2, order = T)
+```
+
+The FeaturePlot command with features = c("nCount_RNA", "nFeature_RNA") visualizes the total RNA count (nCount_RNA) and the number of detected features (nFeature_RNA) for each cell within the PCA space, using the first two principal components (PC1 and PC2). The nCount_RNA represents the total number of RNA molecules (transcripts) detected in each cell, providing insights into the overall transcript abundance. On the other hand, nFeature_RNA indicates the number of unique genes that were detected in each cell, showing how diverse the gene expression is across cells.
+
+```{r}
+library(hexpression)
+HexPlot(seurat_obj, c("nCount_RNA", "nFeature_RNA"), reduction = "pca", dims = 1:2, bins = 150)
+```
+
+To complement the scatterplots, a hexagonal-binning plot (HexPlot) was generated to address the overlap of individual points and provide a clearer view of cell-density patterns. By aggregating cells into hexagonal bins colored by average nCount_RNA or nFeature_RNA, the hexplot highlights regions of particularly high or low expression without being obscured by overplotting, making it easier to identify subpopulations with distinct RNA or feature profiles.
+
+# Elbow plot to select significant PCs
+
+```{r}
+ElbowPlot(seurat_obj, ndims = 50) # Look for "elbow" to choose PCs (e.g., 30)
+```
+
+The PCA elbow plot displays the standard deviation of each principal component (PC) on the y‑axis against the PC index on the x‑axis, revealing how much variance each successive component captures. The first few PCs exhibit high variability, with PC1 starting above a standard deviation of 10, indicating that they explain the bulk of the dataset’s structure. As the component number increases, the standard deviation steadily declines, falling below 5 by around PC8 and approaching values near 2 or even 1 by PC30. Therefore, PC30 could be a good cutoff to balance capturing meaningful biological signal against incorporating noise for downstream clustering and visualization.
+
+# Non-linear Dimensionality Reduction (UMAP/t-SNE)
+
+```{r}
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:30)
+seurat_obj <- RunTSNE(seurat_obj, dims = 1:30)
+```
+
+# Clustering
+
+```{r}
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30, k.param = 20)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.3)
+```
+
+# Plot UMAP/t-SNE
+
+```{r}
+DimPlot(seurat_obj, reduction = "umap", label = TRUE)
+DimPlot(seurat_obj, reduction = "tsne", label = TRUE)
+
+# UMAP Plot for top 10 variable genes
+FeaturePlot(seurat_obj, features = c("PTGDS", "TAC1", "CST3", "CCK", "NPY", "NTS", "PDGFRA", "C1QB", "SST", "SCGN"), 
+            reduction = "umap", pt.size = 0.1)
+
+# t-SNE Plot for top 10 variable genes
+FeaturePlot(seurat_obj, features = c("PTGDS", "TAC1", "CST3", "CCK", "NPY", "NTS", "PDGFRA", "C1QB", "SST", "SCGN"), 
+            reduction = "tsne", pt.size = 0.1)
+```
+
+The UMAP and t-SNE plots are commonly used to visualize the clustering of cells based on their gene expression profiles. These dimensionality reduction techniques map high-dimensional single-cell RNA sequencing data into a two-dimensional space, facilitating the interpretation of patterns in the data. In the resulting plots, cells are grouped into clusters based on similarities in gene expression, and the clusters are labeled to represent different cell types or subpopulations.
+
+When plotting the top 10 variable genes using FeaturePlot, the expression levels of each gene are visualized as a color gradient overlaid on the UMAP and t-SNE plots. The color gradient represents the expression levels, ranging from low (lighter color) to high (darker color). By visualizing the expression of these top variable genes, it becomes possible to observe how gene expression varies across different clusters. This can reveal whether specific genes are particularly relevant to certain cell populations or if they exhibit more uniform expression across the dataset. It also aids in identifying potential gene markers for the clusters defined in the analysis.
+
+# Find Neighbors and Clusters
+
+```{r}
+seurat_obj@reductions$pca@stdev
+seurat_obj@reductions$pca@misc$total.variance
+varExplained <- seurat_obj@reductions$pca@stdev ^2 / seurat_obj@reductions$pca@misc$total.variance * 100
+plot(varExplained, log="y", xlab="PC", ylab="Variance explained (%)")
+
+
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30, k.param = 20) # Adjust k for connectivity
+```
+
+# Cluster at multiple resolutions
+
+```{r}
+seurat_obj <- FindClusters(seurat_obj, resolution = c(0.1, 0.3, 0.5, 1, 2, 3))
+```
+
+# Compare clustering results
+
+```{r}
+DimPlot(seurat_obj, reduction = "umap", group.by = "RNA_snn_res.0.3", label = TRUE)
+```
+
+To identify neighbors and define clusters within the data, resolution-based parameters were used. The resolution setting directly influences the level of detail in clustering. At lower resolutions, fewer clusters are formed, and these clusters tend to contain larger groups of data points. As the resolution increases, the number of clusters rises, breaking the data into smaller, more specific groups. This also results in a reduction in the size of each individual cluster.
+
+This approach highlights a trade-off in clustering: higher resolutions allow for more detailed identification of smaller patterns within the data, while lower resolutions provide broader, more generalized groupings. Adjusting the resolution enables the clustering process to be customized, finding a balance between capturing overall trends and identifying finer details.
+
+# view number of cells in each cluster at different resolution
+
+```{r}
+table(seurat_obj$RNA_snn_res.0.3)
+```
+
+# Plotting known marker genes
+
+```{r}
+seurat_obj <- SetIdent(seurat_obj, value = "RNA_snn_res.0.3")
+FeaturePlot(seurat_obj, features="SLC17A7", label=T)
+FeaturePlot(seurat_obj, features="SLC17A6", label=T)
+FeaturePlot(seurat_obj, features="GAD1", label=T)
+FeaturePlot(seurat_obj, features="GAD2", label=T)
+```
+
+To further examine the clustering results, the number of cells in each cluster was analyzed at various resolutions. Higher resolutions produced more, smaller clusters, while lower resolutions resulted in fewer, larger clusters, providing insights into the dataset's organization.
+
+Additionally, marker genes SLC17A7, SLC17A6, GAD1, and GAD2 were plotted to identify cell types within clusters. Clusters expressing SLC17A7 and SLC17A6 indicated excitatory neurons, while those expressing GAD1 and GAD2 were linked to inhibitory neurons.
+
+# Identify all marker genes for clusters (unbiased approach)
+
+```{r}
+markers <- FindAllMarkers(seurat_obj, min.pct = 0.25, logfc.threshold = 0.5)
+top_markers <- markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+```
+
+```{r}
+head(top_markers)
+```
+
+# Visualize Marker Genes for Each Cluster
+
+```{r}
+# Load required libraries
+library(Seurat)
+library(dplyr)
+
+# Set resolution for cluster identification
+seurat_obj <- SetIdent(seurat_obj, value = "RNA_snn_res.0.3")
+
+# Identify marker genes for all clusters with stricter criteria
+markers <- FindAllMarkers(
+  seurat_obj,
+  only.pos = TRUE,        # Focus on positively expressed genes
+  min.pct = 0.25,         # Minimum fraction of cells expressing the gene
+  logfc.threshold = 0.5   # Minimum log fold change threshold
+)
+
+# Group by cluster and select top marker genes
+top_markers <- markers %>%
+  group_by(cluster) %>%
+  arrange(p_val_adj, desc(avg_log2FC)) %>%  # Prioritize by adjusted p-value and fold-change
+  slice_head(n = 5)                        # Select the top 5 markers per cluster
+
+# Save the top marker genes to a CSV file
+write.csv(top_markers, "top_markers_per_cluster.csv")
+
+# Print the top markers for review
+print(top_markers)
+
+# Visualize the top marker genes for each cluster
+for (cluster_id in unique(top_markers$cluster)) {
+  cluster_markers <- top_markers %>%
+    filter(cluster == cluster_id)
+  
+  print(paste("Visualizing markers for cluster", cluster_id))
+  
+  # Feature plot for top marker genes
+  feature_plot <- FeaturePlot(seurat_obj, features = cluster_markers$gene, label = TRUE, order = TRUE)
+  print(feature_plot)  # Explicitly print the plot
+  
+  # Violin plot for top marker genes
+  violin_plot <- VlnPlot(seurat_obj, features = cluster_markers$gene, idents = cluster_id, flip = TRUE)
+  print(violin_plot)  # Explicitly print the plot
+}
+
+```
+
+# Annotating cell types
+
+```{r}
+# Set resolution-based identities
+Idents(seurat_obj) <- seurat_obj$RNA_snn_res.0.3
+
+# Visualize clusters
+DimPlot(seurat_obj, label = TRUE, label.box = TRUE)
+
+# Top genes for annotation
+top_genes <- list(
+  "0" = "SHISA8",
+  "1" = "GABRA3",
+  "2" = "GJA1",
+  "3" = "TBR1",
+  "4" = "HPCAL1",
+  "5" = "LHX9",
+  "6" = "SV2C",
+  "7" = "CDH2",
+  "8" = "KCNK3",
+  "9" = "PDYN",
+  "10" = "SLC38A4",
+  "11" = "CSF1R",
+  "12" = "LHX6",
+  "13" = "CRISPLD2",
+  "14" = "NKX2-2",
+  "15" = "FOXD3",
+  "16" = "TBX21"
+)
+
+# Visualize top genes for clusters
+FeaturePlot(seurat_obj, features = unlist(top_genes), label = TRUE)
+
+# Violin plots for top marker genes
+VlnPlot(seurat_obj, features = unlist(top_genes), flip = TRUE, stack = TRUE)
+
+# Assign cell type names based on biological knowledge and top genes
+cell_type_names <- c(
+  "0" = "GABAergic Neurons",       # SHISA8
+  "1" = "Interneurons",            # GABRA3
+  "2" = "Astrocytes",              # GJA1
+  "3" = "Excitatory Neurons",      # TBR1
+  "4" = "Glial Cells",             # HPCAL1
+  "5" = "Excitatory Neurons",      # LHX9
+  "6" = "Inhibitory Neurons",      # SV2C
+  "7" = "Vascular Cells",          # CDH2
+  "8" = "Excitatory Neurons",      # KCNK3
+  "9" = "Peptidergic Neurons",     # PDYN
+  "10" = "Oligodendrocyte Precursors", # SLC38A4
+  "11" = "Microglia",              # CSF1R
+  "12" = "Neural Progenitors",     # LHX6
+  "13" = "Non-telencephalic Neurons", # CRISPLD2
+  "14" = "Oligodendrocytes",       # NKX2-2
+  "15" = "Olfactory Ensheathing Cells", # FOXD3
+  "16" = "Immune Cells"            # TBX21
+)
+
+# Rename clusters based on annotations
+seurat_obj <- RenameIdents(object = seurat_obj, cell_type_names)
+
+# Add the renamed identities to the metadata as 'broad_cell_types'
+seurat_obj$broad_cell_types <- Idents(seurat_obj)  # ADD THIS LINE
+
+# Visualize annotated clusters
+DimPlot(seurat_obj, label = TRUE, label.box = TRUE, group.by = "ident")
+
+# Verify broad_cell_types
+table(seurat_obj$broad_cell_types)
+
+# Save the annotated Seurat object
+saveRDS(seurat_obj, file = "annotated_seurat_obj.rds")
+
+```
+
+In this analysis, the clusters were annotated at resolution 0.3 based on the expression of specific top gene markers identified for each cluster. The process involved known biological markers for various cell types to assign an appropriate identity to each cluster. For instance, Cluster 0 was annotated as GABAergic Neurons based on the expression of SHISA8, a gene known to be involved in synaptic signaling and GABAergic neurotransmission. Similarly, Cluster 1 was identified as Interneurons due to the expression of GABRA3, a key subunit of the GABA receptor, marking GABAergic interneurons. Cluster 2, exhibiting high expression of GJA1, a gap junction protein, was classified as Astrocytes, as gap junctions are crucial for astrocytic functions in the central nervous system. Cluster 3, characterized by TBR1, a gene associated with excitatory neurons, was annotated as Excitatory Neurons, reflecting its role in synaptic signaling and neuronal development. Cluster 4 was classified as Glial Cells, with HPCAL1, a calcium-binding protein, marking its association with glial cell functions. Cluster 5 was also annotated as Excitatory Neurons due to the expression of LHX9, a transcription factor known to regulate excitatory neuron differentiation. Cluster 6, exhibiting high levels of SV2C, was identified as Inhibitory Neurons, as SV2C is a vesicle protein involved in GABAergic neurotransmission. Cluster 7, expressing CDH2, a cell adhesion molecule, was designated as Vascular Cells, as this marker is often associated with endothelial cells. Cluster 8 was annotated as Excitatory Neurons, based on the expression of KCNK3, a potassium channel important for neuronal excitability. Cluster 9 was classified as Peptidergic Neurons, with PDYN, a precursor of dynorphin, a neuropeptide involved in pain regulation. Cluster 10 was identified as Oligodendrocyte Precursors based on the expression of SLC38A4, a transporter expressed in oligodendrocyte precursor cells. Cluster 11, characterized by CSF1R, was annotated as Microglia, since CSF1R is a critical marker for microglial cells. Cluster 12, expressing LHX6, was identified as Neural Progenitors, as LHX6 is involved in the development of neural progenitor cells. Cluster 13 was classified as Non-telencephalic Neurons due to the expression of CRISPLD2, a gene expressed in diverse neuronal subtypes. Cluster 14, with high expression of NKX2-2, a marker for oligodendrocytes, was annotated as Oligodendrocytes. Cluster 15, based on FOXD3, a gene important for olfactory ensheathing cells, was classified as Olfactory Ensheathing Cells. Finally, Cluster 16, characterized by TBX21, a transcription factor associated with immune responses, was annotated as Immune Cells.
+
+# Visualize the number of cell counts per cell type
+
+```{r}
+table(seurat_obj$broad_cell_types)
+```
+
+```{r}
+data <- as.data.frame(table(seurat_obj$broad_cell_types))
+colnames(data) <- c("cell.type","count")
+ncells <- ggplot(data, aes(x = cell.type, y = count, fill = cell.type)) +
+geom_col() +
+theme_classic() +
+geom_text(aes(label = count),
+position=position_dodge(width=0.9),
+vjust=-0.25) +
+ggtitle("Cells per cell type") +
+theme(legend.position = "none") +
+theme(axis.text.x = element_text(angle = 45, hjust=1))
+ncells
+```
+
+The distribution of cells across annotated cell types was visualized using a bar plot. This visualization provided a clear overview of the number of cells in each identified cell type, allowing for the assessment of data representation across the dataset.
+
+# DotPlot to visualize gene expression across clusters
+
+```{r}
+seurat_obj <- SetIdent(seurat_obj,value = "broad_cell_types")
+# Define the major features (genes) you want to plot
+Major_Features <- c(
+  "SHISA8", "GABRA3", "GJA1", "TBR1", "HPCAL1", 
+  "LHX9", "SV2C", "CDH2", "KCNK3", "PDYN"
+)
+
+# Now use this in the DotPlot function
+Seurat::DotPlot(seurat_obj, features = Major_Features, scale = FALSE)
+
+DotPlot(seurat_obj, features=Major_Features,scale = FALSE) + RotatedAxis()
+Idents(seurat_obj) <- factor(Idents(seurat_obj), levels = c(
+  "GABAergic Neurons", "Interneurons", "Astrocytes", "Excitatory Neurons",
+  "Glial Cells", "Inhibitory Neurons", "Vascular Cells", "Peptidergic Neurons",
+  "Oligodendrocyte Precursors", "Microglia", "Neural Progenitors",
+  "Non-telencephalic Neurons", "Oligodendrocytes",
+  "Olfactory Ensheathing Cells", "Immune Cells"
+))
+DotPlot(seurat_obj, features=Major_Features) + RotatedAxis()
+DoHeatmap(subset(seurat_obj, downsample = 50), features = Major_Features, size = 3)
+```
+
+To visualize gene expression across the annotated cell types, a DotPlot and heatmap were used. The DotPlot displayed the expression of key marker genes for each cell type, with the size and color of the dots indicating the level of expression. This helped to easily compare how the genes in the Major_Features list were expressed across the different clusters. The cell types were organized in a specific order to make comparisons more straightforward. A heatmap was also generated by downsampling the data, providing a clearer view of gene expression within the cell types. This heatmap highlighted both the intensity and variability of gene expression, helping to confirm the accuracy of the cell type annotations and ensuring that the marker genes were expressed as expected in each cluster.
+
+# Pseudobulking and transcriptome correlation analyses
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(stats)
+library(ggdendro)
+library(pvclust)
+set.seed(42)
+```
+
+# Downsampling
+
+```{r}
+seurat_obj_small <- subset(seurat_obj, downsample = 40)
+DimPlot(seurat_obj)
+DimPlot(seurat_obj_small)
+```
+
+# Calculate aggregate expression for each cell type in Seurat
+
+```{r}
+seurat_obj_agg <- AggregateExpression(object = seurat_obj_small, return.seurat = TRUE)
+```
+
+# Extract the count matrix from the Seurat pseudobulk object
+
+```{r}
+seurat_obj_agg_mtx <- as.data.frame(seurat_obj_agg@assays[["RNA"]]$counts)
+head(seurat_obj_agg_mtx)
+```
+
+# Calculate correlation
+
+```{r}
+matrix_cor_agg <- cor(as.matrix(seurat_obj_agg_mtx),method = "spearman")
+head(matrix_cor_agg)
+```
+
+```{r}
+dist_matrix <- as.dist(1-matrix_cor_agg)
+```
+
+```{r}
+heatmap <- pheatmap(matrix_cor_agg,
+clustering_distance_rows = dist_matrix,
+clustering_distance_cols = dist_matrix,
+main = "Pseudobulk Expression, Spearman",
+cluster_cols = TRUE,
+cluster_rows = TRUE,
+scale = 'none',
+treeheight_row = 0,
+treeheight_col = 40,
+fontsize_row = 7,
+display_numbers = FALSE)
+```
+
+Pseudobulk expression data were created by aggregating the gene expression profiles of each cell type. From there, a Spearman correlation matrix was generated to examine the similarities in gene expression between the different cell types. This step helped to reveal which cell types had similar or distinct transcriptomic profiles. By comparing these relationships, the analysis provided a deeper understanding of how the cell types are connected at the gene expression level, supporting the accuracy and biological relevance of the cell type annotations.
+
+# Hierarchically cluster our cell types according to their transcriptomic profiles
+
+```{r}
+cluster.tree.agg <- hclust(dist_matrix)
+ggdendrogram(cluster.tree.agg) + ggtitle("Average Expression, Spearman")
+```
+
+Hierarchical clustering was performed to group cell types based on their transcriptomic profiles. This clustering revealed the relationships and potential lineage connections between the annotated cell types. The resulting dendrogram offered a visual representation of the distances between cell types, highlighting clusters with shared gene expression patterns. This analysis further validated the distinctions made during the annotation process.
+
+# Distribuition of counts in cell types we defiined
+
+```{r}
+seurat_obj@meta.data %>%
+ggplot(aes(x=nCount_RNA, fill= broad_cell_types)) +
+geom_boxplot(alpha = 0.2) +
+theme_classic() +
+theme(axis.text.y = element_blank()) +
+ggtitle("Counts per Cell")
+```
+
+# Distribuitiom of gene counts
+
+```{r}
+seurat_obj@meta.data %>%
+ggplot(aes(x=nFeature_RNA, fill= broad_cell_types)) +
+geom_boxplot(alpha = 0.2) +
+theme_classic() +
+theme(axis.text.y = element_blank()) +
+ggtitle("Genes per Cell")
+```
+
+# Calculate specificity index.
+
+```{r}
+seurat_obj_spec <- dplyr::mutate(seurat_obj_agg_mtx,"gene" = rownames(seurat_obj_agg_mtx))
+head(seurat_obj_spec)
+```
+
+```{r}
+# Multiply rows for each gene to be in long format
+seurat_obj_spec <- tidyr::gather(seurat_obj_spec,key = "cell_type",
+value = "agg_expr",-gene)
+head(seurat_obj_spec)
+```
+
+```{r}
+# Group dataframe by genes 
+seurat_obj_spec <- seurat_obj_spec %>%
+group_by(gene)
+
+# Filter out all genes with an aggregate expression of 0 across all cell types.
+seurat_obj_spec <- dplyr::filter(seurat_obj_spec,sum(agg_expr) > 0)
+
+# Add a new coloumn the the dataframe that equals the average expression across all clusters for each gene
+seurat_obj_spec <- dplyr::mutate(seurat_obj_spec,avg_tot = mean(agg_expr))
+head(seurat_obj_spec)
+seurat_obj_spec <- ungroup(seurat_obj_spec)
+head(seurat_obj_spec)
+```
+
+```{r}
+# calculate the specificity index by dividing the aggregate expression within each cluster by the average expression across all clusters.
+seurat_obj_spec <- dplyr::mutate(seurat_obj_spec,spec_index = agg_expr / avg_tot)
+head(seurat_obj_spec)
+```
+
+```{r}
+# Subset the dataframe and only leave the columns for cell type, gene, and specificity index
+seurat_obj_spec_final <- dplyr::select(seurat_obj_spec, -agg_expr, -avg_tot)
+head(seurat_obj_spec_final)
+```
+
+```{r}
+# Convert the dataframe back to wide format using the spread() function from tidyr
+seurat_obj_spec_final <- tidyr::spread(seurat_obj_spec_final,
+cell_type,spec_index,fill = 0)
+head(seurat_obj_spec_final)
+##
+```
+
+```{r}
+# This one does not contain row_names, which we will need, so we’ll convert it back to a dataframe.
+seurat_obj_spec_final <- as.data.frame(seurat_obj_spec_final)
+
+# reassign the rownames to the dataframe
+seurat_obj_spec_final <- as.data.frame(seurat_obj_spec_final)
+head(seurat_obj_spec_final)
+```
+
+```{r}
+seurat_obj_spec_final <- seurat_obj_spec_final[, -1]
+head(seurat_obj_spec_final)
+```
+
+The specificity index for each gene across various cell types was calculated to assess the degree of gene expression specificity. The process involved first aggregating gene expression profiles for each cell type and transforming the data into a long format for easier analysis. After filtering out genes with no expression across all cell types, the average expression for each gene was computed, and the specificity index was determined by dividing the aggregate expression of each gene in a specific cell type by its average expression across all cell types. This resulted in a specificity matrix that highlights the gene expression patterns unique to each cell type. The final dataset was converted back into a wide format to facilitate further analysis. The specificity index provides a quantifiable measure of how uniquely a gene is expressed within a particular cell type, offering insights into the gene's potential functional roles in different cell populations.
+
+# Recreate the correlations/heatmap/hierarchical clustering
+
+```{r}
+matrix_cor_spec <- cor(as.matrix(seurat_obj_spec_final),method = "spearman",use = "everything")
+matrix_cor_spec[1:3,1:3]
+```
+
+```{r}
+dist_matrix <- as.dist(1-matrix_cor_spec)
+heatmap <- pheatmap(matrix_cor_spec,
+clustering_distance_rows = dist_matrix,
+clustering_distance_cols = dist_matrix,
+main = "Specificity Index, Spearman",
+cluster_cols = TRUE,
+cluster_rows = TRUE,
+scale = 'none',
+treeheight_row = 0,
+treeheight_col = 40,
+fontsize_row = 7,
+display_numbers = FALSE)
+```
+
+```{r}
+cluster.tree.spec <- hclust(dist_matrix)
+ggdendrogram(cluster.tree.spec) + ggtitle("Specificity Index, Spearman")
+```
+
+To explore the relationships between cell types based on their specificity indices, a correlation matrix was calculated using Spearman's method. The correlation matrix was then used to generate a heatmap and hierarchical clustering of the specificity indices. The hierarchical clustering revealed clusters of genes that exhibit similar specificity profiles across the different cell types. The dendrogram, derived from the hierarchical clustering analysis, displayed the relationships between cell types based on their specificity patterns, helping to visually identify groups of cell types that share similar expression profiles. The heatmap also provided a visual representation of the specificity index, highlighting the degree of specificity for each gene in each cell type.
+
+# Hierarchical clustering with bootstrap support
+
+```{r}
+# Define the Spearman correlation.
+spearman <- function(x, ...) {
+x <- as.matrix(x)
+res <- as.dist(1 - cor(x, method = "spearman", use = "everything"))
+attr(res, "method") <- "spearman"
+return(res)
+}
+```
+
+```{r}
+# Notice that for this method we need to input the specificity index matrix, not a distance matrix directly. This is because we need the gene by cell data for the bootstrap procedure.
+clust1 <- pvclust(data = as.matrix(seurat_obj_spec_final),
+method.dist = spearman,
+method.hclust = "complete",
+nboot = 1000,
+parallel = TRUE,
+iseed = 42,
+store = FALSE)
+```
+
+```{r}
+# Use hang = -1 for an ultrameric tree
+plot(clust1,hang = -1)
+```
+
+To enhance the robustness of the analysis, hierarchical clustering with bootstrap support was used to evaluate the stability of the clusters. A Spearman correlation function was created, and the specificity index matrix served as input for the clustering process. The clustering was performed with 1000 bootstrap resamplings to assess the consistency of the clusters. The resulting ultrameric tree plot displayed bootstrap support values, which provided an indication of the reliability of the cluster assignments. This bootstrap procedure further confirmed the stability of the clustering results, offering a dependable method for exploring the transcriptomic relationships between cell types based on the specificity of gene expression.
+
+# Differential expression analysis with DESeq2
+
+```{r}
+
+
+# Prepare pseudobulk data
+seurat_obj_agg <- AggregateExpression(object = seurat_obj, return.seurat = TRUE)
+
+
+counts <- as.matrix(seurat_obj_agg@assays[["RNA"]]$counts)
+counts[1:5,1:5]
+counts <- round(counts)
+counts[1:5,1:5]
+colnames(counts)
+neuron_counts <- counts[,c(1,3,4,6,7,8)]
+colnames(neuron_counts)
+neuron_counts[1:5,1:5]
+```
+
+```{r}
+# Make the metadata dataframe.
+coldata <- data.frame("cell_type" = colnames(neuron_counts),
+"broad_cell_type" = c("GLUT","GABA","GLUT","GLUT","GABA","GABA"))
+rownames(coldata) <- coldata$cell_type
+head(coldata)
+
+# We need the row names in the metadata to match the column names in the counts matrix and they must be in the same order. So the code below should be TRUE.
+all(rownames(coldata) == colnames(neuron_counts))
+```
+
+# Prepare DESeq input object and run analysis
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = neuron_counts, colData = coldata,
+design = ~ broad_cell_type)
+dds
+dds <- DESeq(dds)
+res <- results(dds)
+summary(res)
+
+# Store results as dataframe 
+res.df <- as.data.frame(results(dds))
+head(res.df)
+
+# Sort by adjusted p-value
+res.df <- arrange(res.df,padj)
+head(res.df)
+
+
+#Plot some of the top genes.
+plotCounts(dds, gene="SOX2", intgroup="broad_cell_type")
+plotCounts(dds, gene="NEUROD6", intgroup="broad_cell_type")
+plotCounts(dds, gene="GAD2", intgroup="broad_cell_type")
+plotCounts(dds, gene="DLX5", intgroup="broad_cell_type")
+plotCounts(dds, gene="SLC32A1", intgroup="broad_cell_type")
+plotCounts(dds,gene = "SHISA8",intgroup = "broad_cell_type")
+```
+
+```{r}
+# Let’s look at the top 20 differentially expressed genes on a heatmap.
+top20 <- rownames(res.df)[1:20]
+top20
+
+# Hierarchically cluster the rows and columns to obtain an organized visualization
+df <- as.data.frame(colData(dds)[,c("broad_cell_type", "cell_type")])
+pheatmap(assay(dds)[top20,],
+cluster_rows=TRUE,
+show_rownames=TRUE,
+cluster_cols = TRUE,
+annotation_col=df,
+scale= "row")
+
+sessionInfo()
+```
+
+Differential expression analysis was performed using the DESeq2 pipeline to compare pseudobulk expression profiles between cell types. This analysis identified genes that were significantly upregulated or downregulated in specific cell types, providing additional insights into the molecular characteristics that define each cell type. The results further refined the annotations and offered a deeper understanding of the functional roles of the identified cell types.
